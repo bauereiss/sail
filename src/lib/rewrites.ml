@@ -744,11 +744,13 @@ let rec subsumes_pat (P_aux (p1, annot1) as pat1) (P_aux (p2, annot2) as pat2) =
       List.fold_right
         (fun p acc ->
           match (p, acc) with
-          | Some (subst, ksubst), Some (substs, ksubsts) -> Some (subst @ substs, ksubst @ ksubsts)
+          | Some (subst, ksubst), Some (substs, ksubsts) ->
+              let substs' = Bindings.union (fun _ _ id -> Some id) subst substs in
+              Some (substs', ksubst @ ksubsts)
           | _ -> None
         )
         subs
-        (Some ([], []))
+        (Some (Bindings.empty, []))
     )
     else None
   in
@@ -779,7 +781,7 @@ let rec subsumes_pat (P_aux (p1, annot1) as pat1) (P_aux (p2, annot2) as pat2) =
     | _ -> []
   in
   match (p1, p2) with
-  | P_lit (L_aux (lit1, _)), P_lit (L_aux (lit2, _)) -> if lit1 = lit2 then Some ([], []) else None
+  | P_lit (L_aux (lit1, _)), P_lit (L_aux (lit2, _)) -> if lit1 = lit2 then Some (Bindings.empty, []) else None
   | P_or (pat1, pat2), _ -> (* todo: possibly not the right answer *) None
   | _, P_or (pat1, pat2) -> (* todo: possibly not the right answer *) None
   | P_not pat, _ -> (* todo: possibly not the right answer *) None
@@ -795,14 +797,14 @@ let rec subsumes_pat (P_aux (p1, annot1) as pat1) (P_aux (p2, annot2) as pat2) =
   | _, P_typ (_, pat2) -> subsumes_pat pat1 pat2
   | P_id (Id_aux (id1, _) as aid1), P_id (Id_aux (id2, _) as aid2) ->
       let ksubsts = typ_substs (typ_of_pat pat1) (typ_of_pat pat2) in
-      if id1 = id2 then Some ([], ksubsts)
+      if id1 = id2 then Some (Bindings.empty, ksubsts)
       else if is_unbound (Env.lookup_id aid1 (env_of_annot annot1)) then
-        if is_unbound (Env.lookup_id aid2 (env_of_annot annot2)) then Some ([(id2, id1)], ksubsts)
-        else Some ([], ksubsts)
+        if is_unbound (Env.lookup_id aid2 (env_of_annot annot2)) then Some (Bindings.singleton aid2 aid1, ksubsts)
+        else Some (Bindings.empty, ksubsts)
       else None
-  | P_id id1, _ -> if is_unbound (Env.lookup_id id1 (env_of_annot annot1)) then Some ([], []) else None
+  | P_id id1, _ -> if is_unbound (Env.lookup_id id1 (env_of_annot annot1)) then Some (Bindings.empty, []) else None
   | P_var (pat1, _), P_var (pat2, _) -> subsumes_pat pat1 pat2
-  | P_wild, _ -> Some ([], [])
+  | P_wild, _ -> Some (Bindings.empty, [])
   | P_app (Id_aux (id1, _), args1), P_app (Id_aux (id2, _), args2) ->
       if id1 = id2 then subsumes_list args1 args2 else None
   | P_vector pats1, P_vector pats2
@@ -814,7 +816,8 @@ let rec subsumes_pat (P_aux (p1, annot1) as pat1) (P_aux (p2, annot2) as pat2) =
   | P_cons _, P_list (pat2 :: pats2) -> subsumes_pat pat1 (rewrap (P_cons (pat2, rewrap (P_list pats2))))
   | P_cons (pat1, pats1), P_cons (pat2, pats2) -> (
       match (subsumes_pat pat1 pat2, subsumes_pat pats1 pats2) with
-      | Some (substs1, ksubsts1), Some (substs2, ksubsts2) -> Some (substs1 @ substs2, ksubsts1 @ ksubsts2)
+      | Some (substs1, ksubsts1), Some (substs2, ksubsts2) ->
+          Some (Bindings.union (fun _ _ id -> Some id) substs1 substs2, ksubsts1 @ ksubsts2)
       | _ -> None
     )
   | P_struct (_, fields1, wild1), P_struct (_, fields2, wild2) ->
@@ -823,7 +826,8 @@ let rec subsumes_pat (P_aux (p1, annot1) as pat1) (P_aux (p2, annot2) as pat2) =
           match List.find_opt (fun (f2, _) -> Id.compare f1 f2 == 0) fields2 with
           | Some (_, p2) -> (
               match (subsumes_pat p1 p2, acc) with
-              | Some (subst, ksubst), Some (substs, ksubsts) -> Some (subst @ substs, ksubst @ ksubsts)
+              | Some (subst, ksubst), Some (substs, ksubsts) ->
+                  Some (Bindings.union (fun _ _ id -> Some id) subst substs, ksubst @ ksubsts)
               | _ -> None
             )
           | None -> (
@@ -832,9 +836,9 @@ let rec subsumes_pat (P_aux (p1, annot1) as pat1) (P_aux (p2, annot2) as pat2) =
               | FP_no_wild -> Reporting.unreachable (fst annot2) __POS__ "Field mismatch in guarded patterns rewrite"
             )
         )
-        (Some ([], []))
+        (Some (Bindings.empty, []))
         fields1
-  | _, P_wild -> if is_irrefutable_pattern pat1 then Some ([], []) else None
+  | _, P_wild -> if is_irrefutable_pattern pat1 then Some (Bindings.empty, []) else None
   | _ -> None
 
 let vector_string_to_bits_pat (L_aux (lit, _) as l_aux) (l, tannot) =
@@ -878,15 +882,14 @@ let rec disjoint_pat env (P_aux (p1, annot1) as pat1) (P_aux (p2, annot2) as pat
 let equiv_pats pat1 pat2 =
   match (subsumes_pat pat1 pat2, subsumes_pat pat2 pat1) with Some _, Some _ -> true | _, _ -> false
 
-let subst_id_pat pat (id1, id2) =
-  let p_id (Id_aux (id, l)) = if id = id1 then P_id (Id_aux (id2, l)) else P_id (Id_aux (id, l)) in
+let subst_id_pat pat substs =
+  let p_id id = match Bindings.find_opt id substs with Some id' -> P_id id' | None -> P_id id in
   fold_pat { id_pat_alg with p_id } pat
 
-let subst_id_exp exp (id1, id2) =
-  Ast_util.subst
-    (Id_aux (id1, Parse_ast.Unknown))
-    (E_aux (E_id (Id_aux (id2, Parse_ast.Unknown)), (Parse_ast.Unknown, empty_tannot)))
-    exp
+let subst_id_exp exp substs =
+  let mk_id_exp id = E_aux (E_id id, (gen_loc (exp_loc exp), empty_tannot)) in
+  let substs' = Bindings.map mk_id_exp substs in
+  Ast_util.subst_ids substs' exp
 
 let rec pat_to_exp env (P_aux (pat, (l, annot)) as p_aux) =
   let pat_to_exp = pat_to_exp env in
@@ -1009,7 +1012,7 @@ let rewrite_toplevel_guarded_clauses fun_only mk_fallthrough l env pat_typ typ
                   let current_pat, _, _, _ = current in
                   match subsumes_pat current_pat pat with
                   | Some (substs, ksubsts) ->
-                      let pat' = List.fold_left subst_id_pat pat substs in
+                      let pat' = subst_id_pat pat substs in
                       (* At the moment we only need accurate type information for the guard, so
                          only substitute type variables there. *)
                       let ksub_typ typ =
@@ -1021,11 +1024,9 @@ let rewrite_toplevel_guarded_clauses fun_only mk_fallthrough l env pat_typ typ
                         )
                       in
                       let guard' =
-                        match guard with
-                        | Some exp -> Some (ksub_exp (List.fold_left subst_id_exp exp substs))
-                        | None -> None
+                        match guard with Some exp -> Some (ksub_exp (subst_id_exp exp substs)) | None -> None
                       in
-                      let body' = List.fold_left subst_id_exp body substs in
+                      let body' = subst_id_exp body substs in
                       let c' = (pat', guard', body', annot) in
                       Some (add_clause current c' :: t)
                   | None ->
@@ -1036,6 +1037,7 @@ let rewrite_toplevel_guarded_clauses fun_only mk_fallthrough l env pat_typ typ
             match find_group acc with
             | Some acc' -> group_aux acc' cs
             | None ->
+                (* Turn wildcards into fresh variables to make sure we don't lose any bindings as we merge more patterns *)
                 let pat = match cs with _ :: _ -> remove_wildcards "g__" pat | _ -> pat in
                 group_aux ((pat, env_of (Option.value ~default:body guard), [c], annot_from_clause annot) :: acc) cs
           )
@@ -1046,6 +1048,7 @@ let rewrite_toplevel_guarded_clauses fun_only mk_fallthrough l env pat_typ typ
         | [((pat, guard, body, annot) as c)] ->
             [(pat, env_of (Option.value ~default:body guard), [c], annot_from_clause annot)]
         | ((pat, guard, body, annot) as c) :: cs ->
+            (* Again, turn wildcards into fresh variables to make sure we don't lose any bindings as we merge patterns *)
             group_aux
               [(remove_wildcards "g__" pat, env_of (Option.value ~default:body guard), [c], annot_from_clause annot)]
               cs

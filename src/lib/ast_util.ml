@@ -1678,85 +1678,97 @@ let concat_ast asts = List.fold_right append_ast asts empty_ast
 
 let type_union_id (Tu_aux (Tu_ty_id (_, id), _)) = id
 
-let rec subst id value (E_aux (e_aux, annot) as exp) =
+let rec subst_ids values (E_aux (e_aux, annot) as exp) =
   let wrap e_aux = E_aux (e_aux, annot) in
   let e_aux =
     match e_aux with
-    | E_block exps -> E_block (List.map (subst id value) exps)
-    | E_id id' -> if Id.compare id id' = 0 then unaux_exp value else E_id id'
+    | E_block exps -> E_block (List.map (subst_ids values) exps)
+    | E_id id' -> (
+        match Bindings.find_opt id' values with Some value -> unaux_exp value | None -> E_id id'
+      )
     | E_lit lit -> E_lit lit
     | E_config parts -> E_config parts
-    | E_typ (typ, exp) -> E_typ (typ, subst id value exp)
-    | E_app (fn, exps) -> E_app (fn, List.map (subst id value) exps)
-    | E_tuple exps -> E_tuple (List.map (subst id value) exps)
-    | E_if (cond, then_exp, else_exp) -> E_if (subst id value cond, subst id value then_exp, subst id value else_exp)
+    | E_typ (typ, exp) -> E_typ (typ, subst_ids values exp)
+    | E_app (fn, exps) -> E_app (fn, List.map (subst_ids values) exps)
+    | E_tuple exps -> E_tuple (List.map (subst_ids values) exps)
+    | E_if (cond, then_exp, else_exp) ->
+        E_if (subst_ids values cond, subst_ids values then_exp, subst_ids values else_exp)
     | E_loop (loop, measure, cond, body) ->
-        E_loop (loop, subst_measure id value measure, subst id value cond, subst id value body)
-    | E_for (id', exp1, exp2, exp3, order, body) when Id.compare id id' = 0 -> E_for (id', exp1, exp2, exp3, order, body)
-    | E_for (id', exp1, exp2, exp3, order, body) ->
-        E_for (id', subst id value exp1, subst id value exp2, subst id value exp3, order, subst id value body)
-    | E_vector exps -> E_vector (List.map (subst id value) exps)
-    | E_vector_append (exp1, exp2) -> E_vector_append (subst id value exp1, subst id value exp2)
-    | E_list exps -> E_list (List.map (subst id value) exps)
-    | E_cons (exp1, exp2) -> E_cons (subst id value exp1, subst id value exp2)
-    | E_struct (struct_name, fexps) -> E_struct (struct_name, List.map (subst_fexp id value) fexps)
-    | E_struct_update (exp, fexps) -> E_struct_update (subst id value exp, List.map (subst_fexp id value) fexps)
-    | E_field (exp, id') -> E_field (subst id value exp, id')
-    | E_match (exp, pexps) -> E_match (subst id value exp, List.map (subst_pexp id value) pexps)
+        E_loop (loop, subst_ids_measure values measure, subst_ids values cond, subst_ids values body)
+    | E_for (id, exp1, exp2, exp3, order, body) ->
+        let values' = Bindings.remove id values in
+        if Bindings.is_empty values' then E_for (id, exp1, exp2, exp3, order, body)
+        else
+          E_for
+            (id, subst_ids values' exp1, subst_ids values' exp2, subst_ids values' exp3, order, subst_ids values' body)
+    | E_vector exps -> E_vector (List.map (subst_ids values) exps)
+    | E_vector_append (exp1, exp2) -> E_vector_append (subst_ids values exp1, subst_ids values exp2)
+    | E_list exps -> E_list (List.map (subst_ids values) exps)
+    | E_cons (exp1, exp2) -> E_cons (subst_ids values exp1, subst_ids values exp2)
+    | E_struct (struct_name, fexps) -> E_struct (struct_name, List.map (subst_ids_fexp values) fexps)
+    | E_struct_update (exp, fexps) -> E_struct_update (subst_ids values exp, List.map (subst_ids_fexp values) fexps)
+    | E_field (exp, id') -> E_field (subst_ids values exp, id')
+    | E_match (exp, pexps) -> E_match (subst_ids values exp, List.map (subst_ids_pexp values) pexps)
     | E_let (pat, bind, body) ->
-        E_let (pat, subst id value bind, if IdSet.mem id (pat_ids pat) then body else subst id value body)
-    | E_assign (lexp, exp) -> E_assign (subst_lexp id value lexp, subst id value exp) (* Shadowing... *)
+        let bind' = subst_ids values bind in
+        let values' = Bindings.filter (fun id _ -> not (IdSet.mem id (pat_ids pat))) values in
+        let body' = if Bindings.is_empty values' then body else subst_ids values' body in
+        E_let (pat, bind', body')
+    | E_assign (lexp, exp) -> E_assign (subst_ids_lexp values lexp, subst_ids values exp) (* Shadowing... *)
     (* Should be re-written *)
     | E_sizeof nexp -> E_sizeof nexp
     | E_constraint nc -> E_constraint nc
-    | E_return exp -> E_return (subst id value exp)
-    | E_exit exp -> E_exit (subst id value exp)
+    | E_return exp -> E_return (subst_ids values exp)
+    | E_exit exp -> E_exit (subst_ids values exp)
     (* id should always be immutable while id' must be mutable register name so should be ok to never substitute here *)
     | E_ref id' -> E_ref id'
-    | E_throw exp -> E_throw (subst id value exp)
-    | E_try (exp, pexps) -> E_try (subst id value exp, List.map (subst_pexp id value) pexps)
-    | E_assert (exp1, exp2) -> E_assert (subst id value exp1, subst id value exp2)
+    | E_throw exp -> E_throw (subst_ids values exp)
+    | E_try (exp, pexps) -> E_try (subst_ids values exp, List.map (subst_ids_pexp values) pexps)
+    | E_assert (exp1, exp2) -> E_assert (subst_ids values exp1, subst_ids values exp2)
     | E_internal_value v -> E_internal_value v
-    | E_var (lexp, exp1, exp2) -> E_var (subst_lexp id value lexp, subst id value exp1, subst id value exp2)
+    | E_var (lexp, exp1, exp2) -> E_var (subst_ids_lexp values lexp, subst_ids values exp1, subst_ids values exp2)
     | E_undef -> E_undef
-    | E_internal_assume (nc, exp) -> E_internal_assume (nc, subst id value exp)
-    | E_internal_plet _ | E_internal_return _ -> failwith ("subst " ^ string_of_exp exp)
+    | E_internal_assume (nc, exp) -> E_internal_assume (nc, subst_ids values exp)
+    | E_internal_plet _ | E_internal_return _ -> failwith ("subst_ids " ^ string_of_exp exp)
   in
   wrap e_aux
 
-and subst_measure id value (Measure_aux (m_aux, l)) =
+and subst_ids_measure values (Measure_aux (m_aux, l)) =
   match m_aux with
   | Measure_none -> Measure_aux (Measure_none, l)
-  | Measure_some exp -> Measure_aux (Measure_some (subst id value exp), l)
+  | Measure_some exp -> Measure_aux (Measure_some (subst_ids values exp), l)
 
-and subst_pexp id value (Pat_aux (pexp_aux, annot)) =
-  let pexp_aux =
-    match pexp_aux with
-    | Pat_exp (pat, exp) when IdSet.mem id (pat_ids pat) -> Pat_exp (pat, exp)
-    | Pat_exp (pat, exp) -> Pat_exp (pat, subst id value exp)
-    | Pat_when (pat, guard, exp) when IdSet.mem id (pat_ids pat) -> Pat_when (pat, guard, exp)
-    | Pat_when (pat, guard, exp) -> Pat_when (pat, subst id value guard, subst id value exp)
-  in
-  Pat_aux (pexp_aux, annot)
+and subst_ids_pexp values pexp =
+  let pat, guard, exp, annot = destruct_pexp pexp in
+  let values' = Bindings.filter (fun id _ -> not (IdSet.mem id (pat_ids pat))) values in
+  let guard' = Option.map (subst_ids values') guard in
+  let exp' = if Bindings.is_empty values' then exp else subst_ids values' exp in
+  construct_pexp (pat, guard', exp', annot)
 
-and subst_fexp id value (FE_aux (FE_fexp (id', exp), annot)) = FE_aux (FE_fexp (id', subst id value exp), annot)
+and subst_ids_fexp values (FE_aux (FE_fexp (id', exp), annot)) = FE_aux (FE_fexp (id', subst_ids values exp), annot)
 
-and subst_lexp id value (LE_aux (lexp_aux, annot)) =
+and subst_ids_lexp values (LE_aux (lexp_aux, annot)) =
   let wrap lexp_aux = LE_aux (lexp_aux, annot) in
   let lexp_aux =
     match lexp_aux with
-    | LE_deref exp -> LE_deref (subst id value exp)
+    | LE_deref exp -> LE_deref (subst_ids values exp)
     | LE_id id' -> LE_id id'
-    | LE_app (f, exps) -> LE_app (f, List.map (subst id value) exps)
+    | LE_app (f, exps) -> LE_app (f, List.map (subst_ids values) exps)
     | LE_typ (typ, id') -> LE_typ (typ, id')
-    | LE_tuple lexps -> LE_tuple (List.map (subst_lexp id value) lexps)
-    | LE_vector (lexp, exp) -> LE_vector (subst_lexp id value lexp, subst id value exp)
+    | LE_tuple lexps -> LE_tuple (List.map (subst_ids_lexp values) lexps)
+    | LE_vector (lexp, exp) -> LE_vector (subst_ids_lexp values lexp, subst_ids values exp)
     | LE_vector_range (lexp, exp1, exp2) ->
-        LE_vector_range (subst_lexp id value lexp, subst id value exp1, subst id value exp2)
-    | LE_vector_concat lexps -> LE_vector_concat (List.map (subst_lexp id value) lexps)
-    | LE_field (lexp, id') -> LE_field (subst_lexp id value lexp, id')
+        LE_vector_range (subst_ids_lexp values lexp, subst_ids values exp1, subst_ids values exp2)
+    | LE_vector_concat lexps -> LE_vector_concat (List.map (subst_ids_lexp values) lexps)
+    | LE_field (lexp, id') -> LE_field (subst_ids_lexp values lexp, id')
   in
   wrap lexp_aux
+
+let subst id value exp = subst_ids (Bindings.singleton id value) exp
+let subst_measure id value m = subst_ids_measure (Bindings.singleton id value) m
+let subst_pexp id value pexp = subst_ids_pexp (Bindings.singleton id value) pexp
+let subst_fexp id value fexp = subst_ids_fexp (Bindings.singleton id value) fexp
+let subst_lexp id value lexp = subst_ids_lexp (Bindings.singleton id value) lexp
 
 let hex_to_bin hex =
   Util.string_to_list hex |> List.map Sail_lib.hex_char |> List.concat |> List.map Sail_lib.char_of_bit |> fun bits ->

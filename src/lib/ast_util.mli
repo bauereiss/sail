@@ -519,6 +519,7 @@ val get_scattered_enum_clauses : id -> ('a, 'b) def list -> (id * unit def_annot
 
 val pat_ids : 'a pat -> IdSet.t
 
+val subst_ids : 'a exp Bindings.t -> 'a exp -> 'a exp
 val subst : id -> 'a exp -> 'a exp -> 'a exp
 
 val hex_to_bin : string -> string
